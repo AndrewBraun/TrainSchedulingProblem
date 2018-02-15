@@ -1,2 +1,2 @@
 # TrainSchedulingProblem
-Train schedulingproblem solved with pthreads and mutexes.
+Train scheduling problem solved with pthreads and mutexes.
