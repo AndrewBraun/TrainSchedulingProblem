@@ -85,7 +85,6 @@ pthread_mutex_t eastHighMutex;
 pthread_mutex_t eastLowMutex;
 pthread_mutex_t westHighMutex;
 pthread_mutex_t westLowMutex;
-pthread_mutex_t readyQueueMutex;
 
 /*
 Mutex and condition for signaling to main that a train is loaded.
@@ -316,9 +315,9 @@ void *trainThread(void *threadArg){
 	usleep(threadArray[ID].loadTime*100000);
 	printMessage(ID, READY);
 	//Adds itself to the queue of trains ready for departure.
-	pthread_mutex_lock(&readyQueueMutex);
+	pthread_mutex_lock(&readyMutex);
 	readyQueue.queue[readyQueue.lastTrainPtr++] = ID;
-	pthread_mutex_unlock(&readyQueueMutex);
+	pthread_mutex_unlock(&readyMutex);
 
 	/*
 	Rather than remiving itself from the station it came from,
@@ -407,7 +406,6 @@ int main(int argc, char *argv[]){
 	pthread_mutex_init(&eastLowMutex, NULL);
 	pthread_mutex_init(&westHighMutex, NULL);
 	pthread_mutex_init(&westLowMutex, NULL);
-	pthread_mutex_init(&readyQueueMutex, NULL);
 	pthread_mutex_init(&readyMutex, NULL);
 	pthread_cond_init(&readyCond, NULL);
 
@@ -434,7 +432,6 @@ int main(int argc, char *argv[]){
 		if(readyQueue.lastTrainPtr == readyQueue.readyTrainPtr){
 			pthread_cond_wait(&readyCond,&readyMutex);
 		}
-		pthread_mutex_lock(&readyQueueMutex);
 		size_t ID;
 		//If two or more trains are ready, pick the correct one.
 		if(readyQueue.lastTrainPtr - readyQueue.readyTrainPtr > 1){
@@ -467,7 +464,6 @@ int main(int argc, char *argv[]){
 			Turn = EAST;
 		}
 		printMessage(ID, OFF);
-		pthread_mutex_unlock(&readyQueueMutex);
 	}
 
 	//Exit the program.
@@ -483,7 +479,6 @@ int main(int argc, char *argv[]){
 	pthread_mutex_destroy(&eastLowMutex);
 	pthread_mutex_destroy(&westHighMutex);
 	pthread_mutex_destroy(&westLowMutex);
-	pthread_mutex_destroy(&readyQueueMutex);
 	pthread_mutex_destroy(&readyMutex);
 	pthread_cond_destroy(&readyCond);
 }
