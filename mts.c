@@ -100,6 +100,7 @@ void putTrainIntoStation(char station, int loadTime, int crossTime, size_t train
 size_t getNumOfTrains(FILE *filePtr);
 void *trainThread(void *threadArg);
 void printMessage(size_t trainID, enum messageType msg);
+void printTime();
 void stationInit(size_t numOfTrains);
 void queueSort(station Station);
 int isEmpty();
@@ -263,13 +264,35 @@ ON: Train <ID> is ON the main track going <direction>.
 OFF: Train <ID> is OFF the main track after going <direction>.
 */
 void printMessage(size_t trainID, enum messageType msg){
-	/*
-	This first gets the time that this function was called.
-	It then findws the difference between it and
-	the time all trains started loading.
-	This gives us the total time that has passed.
-	Source: https://users.pja.edu.pl/~jms/qnx/help/watcom/clibref/qnx/clock_gettime.html
-	*/
+
+	//Prints the time.
+	printTime();
+	//Direction that the train is going.
+	char *dirString = threadArray[trainID].dir == EAST ? "East" : "West";
+	switch (msg){
+		case READY:
+			printf("Train %2zu is ready to go %4s\n",trainID,dirString);
+			break;
+		case ON:
+			printf("Train %2zu is ON the main track going %4s\n",trainID,dirString);
+			break;
+		case OFF:
+			printf("Train %2zu is OFF the main track after going %4s\n",trainID,dirString);
+			break;
+		default:
+			puts("ERROR: Something went wrong in printMessage.");
+			break;
+	}
+}
+
+/*
+This first gets the time that this function was called.
+It then findws the difference between it and
+the time all trains started loading.
+This gives us the total time that has passed.
+Source: https://users.pja.edu.pl/~jms/qnx/help/watcom/clibref/qnx/clock_gettime.html
+*/
+void printTime(){
 	struct timespec end;
 	clock_gettime(CLOCK_MONOTONIC,&end);
 	double seconds = (end.tv_sec - begin.tv_sec) + (double)(end.tv_nsec - begin.tv_nsec)/1000000000;
@@ -282,23 +305,7 @@ void printMessage(size_t trainID, enum messageType msg){
 		hours++;
 		minutes -= 60;
 	}
-
-	//Direction that the train is going.
-	char *dirString = threadArray[trainID].dir == EAST ? "East" : "West";
-	switch (msg){
-		case READY:
-			printf("%02d:%02d:%04.1lf Train %2zu is ready to go %4s\n",hours,minutes,seconds,trainID,dirString);
-			break;
-		case ON:
-			printf("%02d:%02d:%04.1lf Train %2zu is ON the main track going %4s\n",hours,minutes,seconds,trainID,dirString);
-			break;
-		case OFF:
-			printf("%02d:%02d:%04.1lf Train %2zu is OFF the main track after going %4s\n",hours,minutes,seconds,trainID,dirString);
-			break;
-		default:
-			puts("ERROR: Something went wrong in printMessage.");
-			break;
-	}
+	printf("%02d:%02d:%04.1lf ", hours, minutes, seconds);
 }
 
 /*
