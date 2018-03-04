@@ -3,21 +3,17 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <time.h>
+#include <stdint.h>
 
-//Enum that says what direction a train is going.
-//Also used for which turn it is on the track.
 enum direction { EAST, WEST };
+enum priority { HIGH, LOW };
 
 //In case two trains are going in opposite directions with the same priority,
 //this determines which train goes.
 //At the start, it is east.
 enum direction Turn = EAST;
 
-//Enum to hold train priority.
-enum priority { HIGH, LOW };
-
 //Enum to determine what kind of message to output.
-//Used by printMessage() to select the type of output.
 enum messageType { READY, ON, OFF };
 
 /*
@@ -57,83 +53,71 @@ typedef struct {
 	int crossTime;
 	enum direction dir;
 	enum priority pri;
-	pthread_t *thread;
+	pthread_mutex_t trainMutex;
+	pthread_cond_t trainCond;
+	pthread_t thread;
 } threadData;
-
 //Array to hold train info and thread pointers.
 threadData *threadArray;
-
-/*
-This keeps track of the time when all threads started execution.
-printMessage uses this to calculate the time it prints a message.
-*/
+//Starting time.
 struct timespec begin;
-
-/*
-Mutex and condition to coordinate start time for threads.
-Every thread detects the condition signal at the same time,
-thereby starting loading at the same time.
-*/
+//Mutex and condition to coordinate start time for threads.
 pthread_mutex_t startMutex;
 pthread_cond_t startCond;
-
-/*
-Mutexes for trains to adjust station pointers.
-Whenever a train needs to modify readyTrainPtr, it locks the variable.
-*/
+//Mutexes for trains to adjust station pointers.
 pthread_mutex_t eastHighMutex;
 pthread_mutex_t eastLowMutex;
 pthread_mutex_t westHighMutex;
 pthread_mutex_t westLowMutex;
-pthread_mutex_t readyQueueMutex;
-
-/*
-Mutex and condition for signaling to main that a train is loaded.
-When a train is ready to go on the track, it sends this to main.
-*/
+//Mutex and condition for signaling to main that a train is loaded.
 pthread_mutex_t readyMutex;
 pthread_cond_t readyCond;
 
-//Used functions (besides main).
+void initializeMutexes();
 void readFromInput(char *fileName);
 void readLineFromInput(FILE *filePtr, char *station, int *loadTime, int *crossTime);
 void putTrainIntoStation(char station, int loadTime, int crossTime, size_t trainID);
-size_t getNumOfTrains(FILE *filePtr);
+int getNumOfTrains(FILE *filePtr);
 void *trainThread(void *threadArg);
 void printMessage(size_t trainID, enum messageType msg);
-void stationInit(size_t numOfTrains);
+void printTime();
+void stationInit(int numOfTrains);
 void queueSort(station Station);
 int isEmpty();
-size_t bestTrain(size_t a, size_t b);
+int isReady();
+size_t compareTrains(size_t a, size_t b);
+size_t getBestTrain();
+void finalize();
 
-/*
-Reads the input file and loads the trains into the program.
-Exits the program if the file does not exist or if the input is invalid.
-*/
+//Initializes the main mutexes used.
+void initializeMutexes(){
+	pthread_mutex_init(&startMutex, NULL);
+	pthread_mutex_lock(&startMutex);
+	pthread_cond_init(&startCond, NULL);
+	pthread_mutex_init(&eastHighMutex, NULL);
+	pthread_mutex_init(&eastLowMutex, NULL);
+	pthread_mutex_init(&westHighMutex, NULL);
+	pthread_mutex_init(&westLowMutex, NULL);
+	pthread_mutex_init(&readyMutex, NULL);
+	pthread_cond_init(&readyCond, NULL);
+}
+
+//Reads the input file and loads the trains into the program.
 void readFromInput(char *fileName){
-
 	FILE *filePtr;
 	if((filePtr = fopen(fileName, "r")) == NULL){
 		printf("ERROR: %s does not exist.\n",fileName);
 		exit(EXIT_FAILURE);
 	}
-	/*
-	The number of trains in the input file.
-	Used to make sure that the arrays are big enough.
-	*/
+
 	size_t numOfTrains = getNumOfTrains(filePtr);
-	/*
-	Initializes the stations and threadArray.
-	Uses the number of trains to make sure that they're big enough.
-	*/
 	stationInit(numOfTrains);
 	threadArray = (void *)malloc(sizeof(threadData) * (numOfTrains+1));
 
-	char station; //The char representing which station a train will go to.
-	int loadTime; //The loading time of a train.
-	int crossTime; //The crossing time of a train.
-	size_t trainID = 0; //The ID of the train.
-
+	char station;
+	int loadTime;
+	int crossTime;
+	size_t trainID = 0;
 	readLineFromInput(filePtr, &station, &loadTime, &crossTime);
 	while(!feof(filePtr)){
 		putTrainIntoStation(station, loadTime, crossTime, trainID);
@@ -146,11 +130,10 @@ void readFromInput(char *fileName){
 
 /*
 Gets the number of trains in the input file.
-Used for allocating enough space for the stations.
 Source:
 https://stackoverflow.com/questions/12733105/c-function-that-counts-lines-in-file
 */
-size_t getNumOfTrains(FILE *filePtr){
+int getNumOfTrains(FILE *filePtr){
 	size_t numOfTrains = 0;
 	char c;
 	while(!feof(filePtr)){
@@ -160,10 +143,7 @@ size_t getNumOfTrains(FILE *filePtr){
 	return numOfTrains;
 }
 
-/*
-Reads a single line from the input file.
-Exits the program if the file is not properly formatted.
-*/
+//Reads a single line from the input file.
 void readLineFromInput(FILE *filePtr, char *station, int *loadTime, int *crossTime){
 	if(fscanf(filePtr, "%c %d %d\n", station, loadTime, crossTime) != 3){
 		puts("ERROR: input file is not properly formatted.");
@@ -172,7 +152,7 @@ void readLineFromInput(FILE *filePtr, char *station, int *loadTime, int *crossTi
 }
 
 //Initializes the queues.
-void stationInit(size_t numOfTrains){
+void stationInit(int numOfTrains){
         eastHigh.queue = (void *)malloc(sizeof(size_t) * (numOfTrains+1));
         eastLow.queue = (void *)malloc(sizeof(size_t) * (numOfTrains+1));
         westHigh.queue = (void *)malloc(sizeof(size_t) * (numOfTrains+1));
@@ -194,7 +174,7 @@ void stationInit(size_t numOfTrains){
 void putTrainIntoStation(char station, int loadTime, int crossTime, size_t trainID){
 	threadArray[trainID].loadTime = loadTime;
 	threadArray[trainID].crossTime = crossTime;
-	//Selects which station to put the train in.
+
 	switch (station){
 		case 'E':
 			threadArray[trainID].dir = EAST;
@@ -221,27 +201,27 @@ void putTrainIntoStation(char station, int loadTime, int crossTime, size_t train
 			break;
 	}
 	//Threads are kept track of with a pointer in threadData.
+	pthread_mutex_init(&(threadArray[trainID].trainMutex), NULL);
+	pthread_cond_init(&(threadArray[trainID].trainCond), NULL);
 	pthread_t newThread;
-	threadArray->thread = &newThread;
-	pthread_create(&newThread, NULL, trainThread, (void *) trainID);
+	pthread_attr_t attr;
+	pthread_attr_init(&attr);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+	pthread_create(&newThread, &attr, trainThread, (void *) trainID);
+	threadArray[trainID].thread = newThread;
+	pthread_attr_destroy(&attr);
 }
 
 /*
 Sorts the trains in a station by loading times (lowest first).
 Uses selection sort.
-Useful for keeping track of which trains are loaded
-in a station easily.
-
-After a train loads,
-it just needs to increment
-readyTrainPtr
+After a train loads, it increments readyTrainPtr.
 */
 void queueSort(station Station){
 	size_t i,j;
 	size_t *queue = Station.queue;
-	size_t size = Station.lastTrainPtr;
+	int size = Station.lastTrainPtr;
 	if(!size) return;
-
 	for(j = 0; j < size-1; j++){
 		size_t min = j;
 		for(i = j+1; i < size; i++){
@@ -256,21 +236,34 @@ void queueSort(station Station){
 		}
 	}
 }
-/*
-Outputs a message to stdout.
-Calling thread selects which type of message it wants.
-READY: Train <ID> is ready to go <direction>.
-ON: Train <ID> is ON the main track going <direction>.
-OFF: Train <ID> is OFF the main track after going <direction>.
-*/
+
+//Outputs a message to stdout.
 void printMessage(size_t trainID, enum messageType msg){
-	/*
-	This first gets the time that this function was called.
-	It then findws the difference between it and
-	the time all trains started loading.
-	This gives us the total time that has passed.
-	Source: https://users.pja.edu.pl/~jms/qnx/help/watcom/clibref/qnx/clock_gettime.html
-	*/
+	printTime();
+
+	char *dirString = threadArray[trainID].dir == EAST ? "East" : "West";
+	switch (msg){
+		case READY:
+			printf("Train %2zu is ready to go %4s\n",trainID,dirString);
+			break;
+		case ON:
+			printf("Train %2zu is ON the main track going %4s\n",trainID,dirString);
+			break;
+		case OFF:
+			printf("Train %2zu is OFF the main track after going %4s\n",trainID,dirString);
+			break;
+		default:
+			puts("ERROR: Something went wrong in printMessage.");
+			break;
+	}
+}
+
+/*
+Prints the time that an action happens.
+Source:
+https://users.pja.edu.pl/~jms/qnx/help/watcom/clibref/qnx/clock_gettime.html
+*/
+void printTime(){
 	struct timespec end;
 	clock_gettime(CLOCK_MONOTONIC,&end);
 	double seconds = (end.tv_sec - begin.tv_sec) + (double)(end.tv_nsec - begin.tv_nsec)/1000000000;
@@ -283,30 +276,12 @@ void printMessage(size_t trainID, enum messageType msg){
 		hours++;
 		minutes -= 60;
 	}
-
-	//Direction that the train is going.
-	char *dirString = threadArray[trainID].dir == EAST ? "East" : "West";
-	switch (msg){
-		case READY:
-			printf("%02d:%02d:%04.1lf Train %2zu is ready to go %4s\n",hours,minutes,seconds,trainID,dirString);
-			break;
-		case ON:
-			printf("%02d:%02d:%04.1lf Train %2zu is ON the main track going %4s\n",hours,minutes,seconds,trainID,dirString);
-			break;
-		case OFF:
-			printf("%02d:%02d:%04.1lf Train %2zu is OFF the main track after going %4s\n",hours,minutes,seconds,trainID,dirString);
-			break;
-		default:
-			puts("ERROR: Something went wrong in printMessage.");
-			break;
-	}
+	printf("%02d:%02d:%04.1lf ", hours, minutes, seconds);
 }
 
 /*
 Thread used by trains to load.
-It is passed the train's ID.
-From the ID, it uses threadArray to get the train's information.
-Note that crossing is actually handled by main.
+From the train ID passed, it uses threadArray to get the train's information.
 */
 void *trainThread(void *threadArg){
 	size_t ID = (size_t) threadArg;
@@ -316,9 +291,10 @@ void *trainThread(void *threadArg){
 	usleep(threadArray[ID].loadTime*100000);
 	printMessage(ID, READY);
 	//Adds itself to the queue of trains ready for departure.
-	pthread_mutex_lock(&readyQueueMutex);
-	readyQueue.queue[readyQueue.lastTrainPtr++] = ID;
-	pthread_mutex_unlock(&readyQueueMutex);
+	pthread_mutex_lock(&readyMutex);
+	readyQueue.queue[readyQueue.lastTrainPtr] = ID;
+	readyQueue.lastTrainPtr++;
+	pthread_mutex_unlock(&readyMutex);
 
 	/*
 	Rather than remiving itself from the station it came from,
@@ -346,13 +322,16 @@ void *trainThread(void *threadArg){
 	}
 	//Signals to main that it is ready to cross.
 	pthread_cond_signal(&readyCond);
+	pthread_cond_wait(&(threadArray[ID].trainCond), &(threadArray[ID].trainMutex));
+
+	usleep(threadArray[ID].crossTime*100000);
+
+	pthread_mutex_destroy(&(threadArray[ID].trainMutex));
+	pthread_cond_destroy(&(threadArray[ID].trainCond));
 	pthread_exit(NULL);
 }
 
-/*
-Returns boolean based on whether or not all of the queues are empty.
-Useful for checking whether or not main should exit the program.
-*/
+//Returns boolean based on whether or not all of the queues are empty.
 int isEmpty(){
 	if(eastHigh.lastTrainPtr != eastHigh.readyTrainPtr) return 0;
 	if(eastLow.lastTrainPtr != eastLow.readyTrainPtr) return 0;
@@ -362,18 +341,29 @@ int isEmpty(){
 	return 1;
 }
 
+//Returns boolean based on whether or not main can select a train for crossing.
+int isReady(){
+	if(readyQueue.lastTrainPtr == readyQueue.readyTrainPtr) return 0;
+	int loadTime=threadArray[readyQueue.queue[readyQueue.lastTrainPtr-1]].loadTime;
+	if(eastHigh.lastTrainPtr != eastHigh.readyTrainPtr && loadTime >= threadArray[eastHigh.queue[eastHigh.readyTrainPtr]].loadTime) return 0;
+	if(eastLow.lastTrainPtr != eastLow.readyTrainPtr && loadTime >= threadArray[eastLow.queue[eastLow.readyTrainPtr]].loadTime) return 0;
+	if(westHigh.lastTrainPtr != westHigh.readyTrainPtr && loadTime >= threadArray[westHigh.queue[westHigh.readyTrainPtr]].loadTime) return 0;
+	if(westLow.lastTrainPtr != westLow.readyTrainPtr && loadTime >= threadArray[westLow.queue[westLow.readyTrainPtr]].loadTime) return 0;
+	return 1;
+}
+
 //Compares two trains and returns whichever train should go first on the track.
-size_t bestTrain(size_t a, size_t b){
+size_t compareTrains(size_t a, size_t b){
 	threadData aData = threadArray[a];
 	threadData bData = threadArray[b];
-	//If one train has higher priority than the other, the former comes first.
+	//Comapares station priority
 	if(aData.pri == HIGH && bData.pri == LOW){
 		return a;
 	}
 	else if(aData.pri == LOW && bData.pri == HIGH){
 		return b;
 	}
-	//If the trains are going in the same direction, compare loading times and ID.
+	//Compares direction and load time.
 	if(aData.dir == bData.dir){
 		if(aData.loadTime < bData.loadTime){
 			return a;
@@ -391,86 +381,8 @@ size_t bestTrain(size_t a, size_t b){
 	}
 }
 
-int main(int argc, char *argv[]){
-
-	//Checks to see if the user passed the right amount of arguments.
-	if(argc != 2){
-		puts("ERROR: this program needs one input file.");
-		exit(EXIT_FAILURE);
-	}
-
-	//Initialize all mutexes and condition variables.
-	pthread_mutex_init(&startMutex, NULL);
-	pthread_mutex_lock(&startMutex);
-	pthread_cond_init(&startCond, NULL);
-	pthread_mutex_init(&eastHighMutex, NULL);
-	pthread_mutex_init(&eastLowMutex, NULL);
-	pthread_mutex_init(&westHighMutex, NULL);
-	pthread_mutex_init(&westLowMutex, NULL);
-	pthread_mutex_init(&readyQueueMutex, NULL);
-	pthread_mutex_init(&readyMutex, NULL);
-	pthread_cond_init(&readyCond, NULL);
-
-	//Initialize all trains.
-	readFromInput(argv[1]);
-
-	//Sort trains in the queue by load time.
-	queueSort(eastHigh);
-	queueSort(eastLow);
-  queueSort(westHigh);
-  queueSort(westLow);
-
-	//Wait a second to make sure all trains have time to prepare for loading.
-	usleep(1000000);
-	//Signal to all trains that they can start loading.
-	pthread_cond_broadcast(&startCond);
-	//Get the time that all trains started laoding.
-	clock_gettime(CLOCK_MONOTONIC,&begin);
-
-	pthread_mutex_lock(&readyMutex);
-	//Continue until all trains are done.
-	while(!isEmpty()){
-		//Wait until a train is done loading.
-		if(readyQueue.lastTrainPtr == readyQueue.readyTrainPtr){
-			pthread_cond_wait(&readyCond,&readyMutex);
-		}
-		pthread_mutex_lock(&readyQueueMutex);
-		size_t ID;
-		//If two or more trains are ready, pick the correct one.
-		if(readyQueue.lastTrainPtr - readyQueue.readyTrainPtr > 1){
-			size_t minID = readyQueue.readyTrainPtr;
-			size_t i;
-
-			for(i = readyQueue.readyTrainPtr+1; i < readyQueue.lastTrainPtr; i++){
-				minID = bestTrain(minID,i);
-			}
-			if(minID != readyQueue.readyTrainPtr){
-				size_t temp = readyQueue.queue[readyQueue.readyTrainPtr];
-				readyQueue.queue[readyQueue.readyTrainPtr] = readyQueue.queue[minID];
-				readyQueue.queue[minID] = temp;
-			}
-			readyQueue.readyTrainPtr++;
-			ID = readyQueue.queue[minID];
-		}
-		//If there is only one train ready, pick that one.
-		else{
-			ID = readyQueue.queue[readyQueue.readyTrainPtr++];
-		}
-		printMessage(ID, ON);
-		//Cross the train.
-		usleep(threadArray[ID].crossTime*100000);
-
-		if(threadArray[ID].dir == EAST){
-			Turn = WEST;
-		}
-		else{
-			Turn = EAST;
-		}
-		printMessage(ID, OFF);
-		pthread_mutex_unlock(&readyQueueMutex);
-	}
-
-	//Exit the program.
+//Releases the structures and utexes from memory.
+void finalize(){
 	free(eastHigh.queue);
 	free(eastLow.queue);
 	free(westHigh.queue);
@@ -483,7 +395,72 @@ int main(int argc, char *argv[]){
 	pthread_mutex_destroy(&eastLowMutex);
 	pthread_mutex_destroy(&westHighMutex);
 	pthread_mutex_destroy(&westLowMutex);
-	pthread_mutex_destroy(&readyQueueMutex);
 	pthread_mutex_destroy(&readyMutex);
 	pthread_cond_destroy(&readyCond);
+}
+
+// Gets the best train from the trains ready to cross.
+size_t getBestTrain(){
+	size_t minID = readyQueue.readyTrainPtr;
+	size_t i;
+
+	for(i = readyQueue.readyTrainPtr+1; i < readyQueue.lastTrainPtr; i++){
+		size_t a = readyQueue.queue[minID];
+		size_t b = readyQueue.queue[i];
+		size_t c = compareTrains(a,b);
+		if(c == b) minID = i;
+	}
+	if(minID != readyQueue.readyTrainPtr){
+		size_t temp = readyQueue.queue[readyQueue.readyTrainPtr];
+		readyQueue.queue[readyQueue.readyTrainPtr] = readyQueue.queue[minID];
+		readyQueue.queue[minID] = temp;
+	}
+	readyQueue.readyTrainPtr++;
+	return readyQueue.queue[readyQueue.readyTrainPtr-1];
+}
+
+int main(int argc, char *argv[]){
+	if(argc != 2){
+		puts("ERROR: this program needs one input file.");
+		exit(EXIT_FAILURE);
+	}
+	initializeMutexes();
+	readFromInput(argv[1]);
+	//Sort trains in the queue by load time.
+	queueSort(eastHigh);
+	queueSort(eastLow);
+  queueSort(westHigh);
+  queueSort(westLow);
+
+	//Wait a second to make sure all trains have time to prepare for loading.
+	usleep(1000000);
+	//Signal to all trains that they can start loading.
+	pthread_cond_broadcast(&startCond);
+	//Get the time that all trains started loading.
+	clock_gettime(CLOCK_MONOTONIC,&begin);
+
+	pthread_mutex_lock(&readyMutex);
+	//Continue until all trains are done.
+	while(!isEmpty()){
+		//Wait until all trains are done loading.
+		while(!isReady()){
+			pthread_cond_wait(&readyCond,&readyMutex);
+		}
+		size_t ID = getBestTrain();
+
+		pthread_mutex_unlock(&readyMutex);
+		printMessage(ID, ON);
+		//Cross the train.
+		pthread_cond_signal(&(threadArray[ID].trainCond));
+		pthread_join(threadArray[ID].thread, NULL);
+		if(threadArray[ID].dir == EAST){
+			Turn = WEST;
+		}
+		else{
+			Turn = EAST;
+		}
+		printMessage(ID, OFF);
+	}
+
+	finalize();
 }
