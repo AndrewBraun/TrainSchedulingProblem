@@ -22,4 +22,7 @@ When main detects that a train is ready for loading,
 it first checks to see if there are any trains with the same loading time.
 If yes, it loads those trains too.
 If not, then it scans the ready station and selects the best train.
-
+Once main has selected a train, it signals the thread's convar.
+Then the train threads usleeps for the crossing time.
+Once a train is done, it destroys its mutex and convar, then exits.
+This process repeats until all the trains are done.
